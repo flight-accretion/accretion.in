@@ -1,0 +1,53 @@
+name: Deploy Accretion Website
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  APP_NAME: accretion-in
+  APP_PORT: 8097
+  REMOTE_DIR: /opt/accretion-in
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t "${APP_NAME}:${GITHUB_SHA}" .
+
+      - name: Save Docker image
+        run: docker save "${APP_NAME}:${GITHUB_SHA}" | gzip > "${APP_NAME}.tar.gz"
+
+      - name: Prepare SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Copy image to VPS
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" "mkdir -p '${REMOTE_DIR}'"
+          scp -i ~/.ssh/deploy_key "${APP_NAME}.tar.gz" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${REMOTE_DIR}/${APP_NAME}.tar.gz"
+
+      - name: Restart container on VPS
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" "
+            set -e
+            gzip -dc '${REMOTE_DIR}/${APP_NAME}.tar.gz' | docker load
+            docker rm -f '${APP_NAME}' || true
+            docker run -d \
+              --name '${APP_NAME}' \
+              --restart unless-stopped \
+              -p '${APP_PORT}:80' \
+              '${APP_NAME}:${GITHUB_SHA}'
+            rm -f '${REMOTE_DIR}/${APP_NAME}.tar.gz'
+            docker image prune -f
+          "
